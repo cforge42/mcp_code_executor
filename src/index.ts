@@ -8,7 +8,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { randomBytes } from 'crypto';
 import { join } from 'path';
-import { mkdir, writeFile, appendFile, readFile, access, unlink } from 'fs/promises';
+import { mkdir, writeFile, appendFile, readFile, access, unlink, readdir } from 'fs/promises';
 import { exec, ExecOptions } from 'child_process';
 import { promisify } from 'util';
 import { platform } from 'os';
@@ -324,6 +324,37 @@ async function readCodeFile(filePath: string) {
 }
 
 /**
+ * List files in the code storage directory (non-recursive).
+ */
+async function listCodeFiles() {
+    try {
+        const files = await readdir(CODE_STORAGE_DIR, { withFileTypes: false });
+        return makeResponse({ status: 'success', files }, false);
+    } catch (error) {
+        return makeResponse({ status: 'error', error: error instanceof Error ? error.message : String(error) }, true);
+    }
+}
+
+/**
+ * Delete a code file (best-effort, checks path)
+ */
+async function deleteCodeFile(filePath: string) {
+    try {
+        // Only allow deletion of files inside CODE_STORAGE_DIR for safety
+        if (!filePath.startsWith(CODE_STORAGE_DIR)) {
+            return makeResponse({ status: 'error', error: 'file_path must be inside CODE_STORAGE_DIR' }, true);
+        }
+
+        await access(filePath);
+        await unlink(filePath);
+
+        return makeResponse({ status: 'success', message: 'File deleted', file_path: filePath }, false);
+    } catch (error) {
+        return makeResponse({ status: 'error', error: error instanceof Error ? error.message : String(error), file_path: filePath }, true);
+    }
+}
+
+/**
  * Install dependencies using the appropriate package manager
  */
 async function installDependencies(packages: string[]) {
@@ -631,6 +662,28 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                     required: ["file_path"]
                 }
             },
+            {
+                name: "list_code_files",
+                description: "List files in the code storage directory",
+                inputSchema: {
+                    type: "object",
+                    properties: {}
+                }
+            },
+            {
+                name: "delete_code_file",
+                description: "Delete a code file from the storage directory (must be inside CODE_STORAGE_DIR)",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        file_path: {
+                            type: "string",
+                            description: "Full path to the file to delete"
+                        }
+                    },
+                    required: ["file_path"]
+                }
+            },
             
             {
                 name: "install_dependencies",
@@ -872,6 +925,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     text: result.text,
                     isError: result.isError
                 }]
+            };
+        }
+
+        case "list_code_files": {
+            const result = await listCodeFiles();
+            return {
+                content: [{ type: 'text', text: result.text, isError: result.isError }]
+            };
+        }
+
+        case "delete_code_file": {
+            const args = request.params.arguments as { file_path?: string };
+            if (!args?.file_path) {
+                throw new Error("File path is required");
+            }
+
+            const result = await deleteCodeFile(args.file_path);
+            return {
+                content: [{ type: 'text', text: result.text, isError: result.isError }]
             };
         }
         
