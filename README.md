@@ -3,8 +3,6 @@
 
 The MCP Code Executor is an MCP server that allows LLMs to execute Python code within a specified Python environment. This enables LLMs to run code with access to libraries and dependencies defined in the environment. It also supports incremental code generation for handling large code blocks that may exceed token limits.
 
-<a href="https://glama.ai/mcp/servers/45ix8xode3"><img width="380" height="200" src="https://glama.ai/mcp/servers/45ix8xode3/badge" alt="Code Executor MCP server" /></a>
-
 ## Features
 
 - Execute Python code from LLM prompts
