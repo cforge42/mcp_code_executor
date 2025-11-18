@@ -8,7 +8,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { randomBytes } from 'crypto';
 import { join } from 'path';
-import { mkdir, writeFile, appendFile, readFile, access } from 'fs/promises';
+import { mkdir, writeFile, appendFile, readFile, access, unlink } from 'fs/promises';
 import { exec, ExecOptions } from 'child_process';
 import { promisify } from 'util';
 import { platform } from 'os';
@@ -52,6 +52,39 @@ if (ENV_CONFIG.type === 'conda' && !ENV_CONFIG.conda_name) {
 await mkdir(CODE_STORAGE_DIR, { recursive: true });
 
 const execAsync = promisify(exec);
+
+// Standardized tool response shape
+type ToolResponse = {
+    type: 'text';
+    text: string;
+    isError: boolean;
+};
+
+function makeResponse(payload: any, isError = false): ToolResponse {
+    return {
+        type: 'text',
+        text: typeof payload === 'string' ? payload : JSON.stringify(payload),
+        isError,
+    };
+}
+
+/**
+ * Run a shell command and capture stdout/stderr even on non-zero exit codes.
+ * This ensures we return useful information when a process fails.
+ */
+async function runCommand(command: string, options: ExecOptions & { cwd?: string; env?: NodeJS.ProcessEnv } = {}) {
+    try {
+        const { stdout, stderr } = await execAsync(command, options);
+        return { stdout: stdout ?? '', stderr: stderr ?? '' };
+    } catch (err: any) {
+        // err may contain stdout/stderr properties for failed commands
+        return {
+            stdout: err.stdout ?? '',
+            stderr: err.stderr ?? (err.message ? String(err.message) : String(err)),
+            error: err.message ?? String(err)
+        };
+    }
+}
 
 /**
  * Get platform-specific command for environment activation and execution
@@ -120,24 +153,15 @@ async function executeCode(code: string, filePath: string) {
         const pythonCmd = platform() === 'win32' ? `python -u "${filePath}"` : `python3 -u "${filePath}"`;
         const { command, options } = getPlatformSpecificCommand(pythonCmd);
 
-        // Execute code
-        const { stdout, stderr } = await execAsync(command, {
+        // Execute code (capture stdout/stderr even on non-zero exit)
+        const { stdout, stderr } = await runCommand(command, {
             cwd: CODE_STORAGE_DIR,
             env: { ...process.env, PYTHONUNBUFFERED: '1' },
             ...options
         });
 
-        const response = {
-            status: stderr ? 'error' : 'success',
-            output: stderr || stdout,
-            file_path: filePath
-        };
-
-        return {
-            type: 'text',
-            text: JSON.stringify(response),
-            isError: !!stderr
-        };
+        const status = stderr ? 'error' : 'success';
+        return makeResponse({ status, output: stderr || stdout, file_path: filePath }, !!stderr);
     } catch (error) {
         const response = {
             status: 'error',
@@ -165,24 +189,15 @@ async function executeCodeFromFile(filePath: string) {
         const pythonCmd = platform() === 'win32' ? `python -u "${filePath}"` : `python3 -u "${filePath}"`;
         const { command, options } = getPlatformSpecificCommand(pythonCmd);
 
-        // Execute code with unbuffered Python
-        const { stdout, stderr } = await execAsync(command, {
+        // Execute code with unbuffered Python and capture stderr/stdout
+        const { stdout, stderr } = await runCommand(command, {
             cwd: CODE_STORAGE_DIR,
             env: { ...process.env, PYTHONUNBUFFERED: '1' },
             ...options
         });
 
-        const response = {
-            status: stderr ? 'error' : 'success',
-            output: stderr || stdout,
-            file_path: filePath
-        };
-
-        return {
-            type: 'text',
-            text: JSON.stringify(response),
-            isError: !!stderr
-        };
+        const status = stderr ? 'error' : 'success';
+        return makeResponse({ status, output: stderr || stdout, file_path: filePath }, !!stderr);
     } catch (error) {
         const response = {
             status: 'error',
@@ -351,26 +366,22 @@ async function installDependencies(packages: string[]) {
         // Get platform-specific command
         const { command, options } = getPlatformSpecificCommand(installCmd);
 
-        // Execute installation with unbuffered Python
-        const { stdout, stderr } = await execAsync(command, {
+        // Execute installation and capture stdout/stderr
+        const { stdout, stderr } = await runCommand(command, {
             cwd: CODE_STORAGE_DIR,
             env: { ...process.env, PYTHONUNBUFFERED: '1' },
             ...options
         });
 
         const response = {
-            status: 'success',
+            status: stderr ? 'error' : 'success',
             env_type: ENV_CONFIG.type,
             installed_packages: packages,
             output: stdout,
             warnings: stderr || undefined
         };
 
-        return {
-            type: 'text',
-            text: JSON.stringify(response),
-            isError: false
-        };
+        return makeResponse(response, !!stderr);
     } catch (error) {
         const response = {
             status: 'error',
@@ -460,21 +471,28 @@ print(json.dumps(results))
         const pythonCmd = platform() === 'win32' ? `python -u "${checkScriptPath}"` : `python3 -u "${checkScriptPath}"`;
         const { command, options } = getPlatformSpecificCommand(pythonCmd);
 
-        const { stdout, stderr } = await execAsync(command, {
-            cwd: CODE_STORAGE_DIR,
-            env: { ...process.env, PYTHONUNBUFFERED: '1' },
-            ...options
-        });
+        // Run the command and ensure we remove the temporary script afterwards
+        let stdout = '';
+        let stderr = '';
+        try {
+            const runResult = await runCommand(command, {
+                cwd: CODE_STORAGE_DIR,
+                env: { ...process.env, PYTHONUNBUFFERED: '1' },
+                ...options
+            });
+            stdout = runResult.stdout ?? '';
+            stderr = runResult.stderr ?? '';
+        } finally {
+            // Best-effort cleanup of the temporary check script
+            try {
+                await unlink(checkScriptPath);
+            } catch (e) {
+                // ignore cleanup errors
+            }
+        }
 
         if (stderr) {
-            return {
-                type: 'text',
-                text: JSON.stringify({
-                    status: 'error',
-                    error: stderr
-                }),
-                isError: true
-            };
+            return makeResponse({ status: 'error', error: stderr }, true);
         }
 
         // Parse the package information
